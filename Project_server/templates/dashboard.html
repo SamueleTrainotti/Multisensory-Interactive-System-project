@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Sensor Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+        }
+        .card h2 {
+            margin-top: 0;
+            color: #2c3e50;
+            border-bottom: 2px solid #eee;
+            padding-bottom: 10px;
+        }
+        .status {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .status-indicator {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            margin-right: 10px;
+            background: #ccc;
+            transition: background-color 0.3s ease;
+        }
+        .status-indicator.connected {
+            background: #27ae60;
+        }
+        .status-indicator.disconnected {
+            background: #e74c3c;
+        }
+        .status-indicator.in-pos {
+            background: #27ae60;
+        }
+        .value-display {
+            font-size: 1.2em;
+            font-weight: bold;
+            margin: 5px 0;
+        }
+        .chart-container {
+            height: 300px;
+            margin-top: 20px;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 20px;
+            color: #7f8c8d;
+            font-size: 0.9em;
+        }
+        .debug-log {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 10px;
+            margin: 10px 0;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 0.8em;
+        }
+        @media (max-width: 768px) {
+            .container {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <h1 style="text-align: center; color: #2c3e50;">Sensor Data Dashboard</h1>
+    
+    <div class="container">
+        <div class="card">
+            <h2>Angle Measurements</h2>
+            <div class="value-display">Vertical: <span id="vert-value">0.00</span>°</div>
+            <div class="value-display">Lateral: <span id="lat-value">0.00</span>°</div>
+            <div class="value-display">Torsion: <span id="tors-value">0.00</span>°</div>
+        </div>
+        
+        <div class="card">
+            <h2>Position Status</h2>
+            <div class="status">
+                <div class="status-indicator" id="pos-status"></div>
+                <span id="pos-text" style="font-weight: bold;">Unknown</span>
+            </div>
+            <div class="value-display">Time in Position: <span id="tempo-pos">0</span> ms</div>
+            <div class="value-display">Count: <span id="count">0</span></div>
+        </div>
+
+        <div class="card">
+            <h2>Connection Status</h2>
+            <div class="status">
+                <div class="status-indicator" id="connection-indicator"></div>
+                <span id="connection-text">Connecting...</span>
+            </div>
+            <div>Socket ID: <span id="socket-id">N/A</span></div>
+            <div>Events Received: <span id="event-count">0</span></div>
+            <div>Last Event: <span id="last-event">Never</span></div>
+            <button onclick="reconnectSocket()" id="reconnect-btn">Reconnect</button>
+            <button onclick="testConnection()" id="test-btn">Test Connection</button>
+        </div>
+        
+        <div class="card" style="grid-column: span 3;">
+            <h2>Angle Visualization</h2>
+            <div class="chart-container">
+                <canvas id="angle-chart"></canvas>
+            </div>
+        </div>
+
+        <div class="card" style="grid-column: span 2;">
+            <h2>Debug Log</h2>
+            <div class="debug-log" id="debug-log"></div>
+            <button onclick="clearDebugLog()">Clear Log</button>
+        </div>
+    </div>
+    
+    <div class="footer">
+        Last Update: <span id="last-update">Never</span> | 
+        System Time: <span id="current-time">--:--:--</span> |
+        Time Since Last: <span id="time-since">N/A</span>
+    </div>
+ 
+    <script>
+        // Global variables
+        let socket;
+        let chart;
+        let eventCount = 0;
+        let lastEventTime = 0;
+        
+        // Debug logging
+        function addDebugLog(message) {
+            const debugLog = document.getElementById('debug-log');
+            const timestamp = new Date().toLocaleTimeString();
+            debugLog.innerHTML += `[${timestamp}] ${message}<br>`;
+            debugLog.scrollTop = debugLog.scrollHeight;
+            console.log(`[${timestamp}] ${message}`);
+        }
+        
+        function clearDebugLog() {
+            document.getElementById('debug-log').innerHTML = '';
+        }
+        
+        // Initialize Socket.IO connection
+        function initializeSocket() {
+            addDebugLog('Initializing Socket.IO connection...');
+            
+            // Disconnect existing socket if any
+            if (socket) {
+                socket.disconnect();
+            }
+            
+            // Create new socket with proper configuration for Flask-SocketIO
+            socket = io({
+                transports: ['websocket', 'polling'],  // Allow both transports
+                upgrade: true,                         // Allow upgrading from polling to websocket
+                reconnection: true,
+                reconnectionAttempts: 10,
+                reconnectionDelay: 1000,
+                timeout: 10000,
+                forceNew: true
+            });
+            
+            // Connection events
+            socket.on('connect', () => {
+                addDebugLog(`Connected! Socket ID: ${socket.id}`);
+                updateConnectionStatus(true, socket.id);
+                eventCount = 0;
+            });
+            
+            socket.on('disconnect', (reason) => {
+                addDebugLog(`Disconnected: ${reason}`);
+                updateConnectionStatus(false, 'N/A');
+            });
+            
+            socket.on('connect_error', (error) => {
+                addDebugLog(`Connection error: ${error.message}`);
+                updateConnectionStatus(false, 'Error');
+            });
+            
+            socket.on('reconnect', (attemptNumber) => {
+                addDebugLog(`Reconnected after ${attemptNumber} attempts`);
+            });
+            
+            socket.on('reconnect_attempt', (attemptNumber) => {
+                addDebugLog(`Reconnection attempt ${attemptNumber}`);
+            });
+            
+            socket.on('reconnect_error', (error) => {
+                addDebugLog(`Reconnection error: ${error.message}`);
+            });
+            
+            socket.on('reconnect_failed', () => {
+                addDebugLog('Reconnection failed - giving up');
+            });
+            
+            // Data event handler
+            socket.on('sensor_update', function(data) {
+                try {
+                    eventCount++;
+                    lastEventTime = Date.now();
+                    addDebugLog(`Sensor data received: ${JSON.stringify(data)}`);
+                    updateDashboard(data);
+                } catch (error) {
+                    addDebugLog(`Error processing sensor data: ${error.message}`);
+                }
+            });
+            
+            // System status handler
+            socket.on('system_status', function(data) {
+                addDebugLog(`System status: ${JSON.stringify(data)}`);
+            });
+            
+            // Generic message handler for debugging
+            socket.onAny((eventName, ...args) => {
+                if (eventName !== 'sensor_update' && eventName !== 'system_status') {
+                    addDebugLog(`Received event '${eventName}': ${JSON.stringify(args)}`);
+                }
+            });
+        }
+        
+        // Update connection status UI
+        function updateConnectionStatus(connected, socketId) {
+            const indicator = document.getElementById('connection-indicator');
+            const text = document.getElementById('connection-text');
+            const socketIdSpan = document.getElementById('socket-id');
+            
+            if (connected) {
+                indicator.className = 'status-indicator connected';
+                text.textContent = 'Connected';
+                text.style.color = '#27ae60';
+                socketIdSpan.textContent = socketId;
+            } else {
+                indicator.className = 'status-indicator disconnected';
+                text.textContent = 'Disconnected';
+                text.style.color = '#e74c3c';
+                socketIdSpan.textContent = socketId;
+            }
+        }
+        
+        // Reconnect function
+        function reconnectSocket() {
+            addDebugLog('Manual reconnection requested');
+            if (socket) {
+                socket.disconnect();
+                setTimeout(() => {
+                    initializeSocket();
+                }, 1000);
+            } else {
+                initializeSocket();
+            }
+        }
+        
+        // Test connection function
+        function testConnection() {
+            addDebugLog('Testing connection...');
+            if (socket && socket.connected) {
+                // Try to emit a test event
+                socket.emit('test_message', { timestamp: Date.now() });
+                addDebugLog('Test message sent');
+                
+                // Also request debug data from server
+                fetch('/debug')
+                    .then(response => response.text())
+                    .then(text => addDebugLog(`Debug endpoint response: ${text}`))
+                    .catch(error => addDebugLog(`Debug endpoint error: ${error.message}`));
+            } else {
+                addDebugLog('Cannot test - not connected');
+            }
+        }
+        
+        // Initialize chart
+        function initializeChart() {
+            const ctx = document.getElementById('angle-chart').getContext('2d');
+            chart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: ['Vertical', 'Lateral', 'Torsion'],
+                    datasets: [{
+                        label: 'Current Angle Values (degrees)',
+                        data: [0, 0, 0],
+                        backgroundColor: [
+                            'rgba(54, 162, 235, 0.7)',
+                            'rgba(75, 192, 192, 0.7)',
+                            'rgba(153, 102, 255, 0.7)'
+                        ],
+                        borderColor: [
+                            'rgba(54, 162, 235, 1)',
+                            'rgba(75, 192, 192, 1)',
+                            'rgba(153, 102, 255, 1)'
+                        ],
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: { 
+                        y: { 
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: 'Degrees'
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top'
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Update dashboard with new data
+        function updateDashboard(data) {
+            try {
+                // Update angle values - handle null values
+                document.getElementById('vert-value').textContent = data.vert !== null ? data.vert.toFixed(2) : 'N/A';
+                document.getElementById('lat-value').textContent = data.lat !== null ? data.lat.toFixed(2) : 'N/A';
+                document.getElementById('tors-value').textContent = data.tors !== null ? data.tors.toFixed(2) : 'N/A';
+                
+                // Position status
+                const posIndicator = document.getElementById('pos-status');
+                const posText = document.getElementById('pos-text');
+                if (data.inPos) {
+                    posIndicator.className = 'status-indicator in-pos';
+                    posText.textContent = 'In Position';
+                    posText.style.color = '#27ae60';
+                } else {
+                    posIndicator.className = 'status-indicator';
+                    posText.textContent = 'Not in Position';
+                    posText.style.color = '#e74c3c';
+                }
+                
+                // Other values
+                document.getElementById('tempo-pos').textContent = data.tempoPos;
+                document.getElementById('count').textContent = data.conteggio;
+                
+                // Update chart - only update if all values are valid
+                if (chart && data.vert !== null && data.lat !== null && data.tors !== null) {
+                    chart.data.datasets[0].data = [data.vert, data.lat, data.tors];
+                    chart.update('none');
+                } else if (chart) {
+                    // Update with available values, use 0 for null
+                    chart.data.datasets[0].data = [
+                        data.vert !== null ? data.vert : 0,
+                        data.lat !== null ? data.lat : 0,
+                        data.tors !== null ? data.tors : 0
+                    ];
+                    chart.update('none');
+                }
+                
+                // Update timestamps
+                document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+                document.getElementById('event-count').textContent = eventCount;
+                document.getElementById('last-event').textContent = new Date().toLocaleTimeString();
+            } catch (error) {
+                addDebugLog(`Error updating dashboard: ${error.message}`);
+            }
+        }
+        
+        // Update system time every second
+        setInterval(() => {
+            document.getElementById('current-time').textContent = new Date().toLocaleTimeString();
+            
+            // Update time since last event
+            if (lastEventTime) {
+                const secondsSince = Math.floor((Date.now() - lastEventTime) / 1000);
+                document.getElementById('time-since').textContent = `${secondsSince}s`;
+            }
+        }, 1000);
+        
+        // Initialize everything when page loads
+        window.addEventListener('load', () => {
+            addDebugLog('Dashboard initializing...');
+            initializeChart();
+            initializeSocket();
+            addDebugLog('Dashboard ready');
+        });
+        
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (socket) {
+                socket.disconnect();
+            }
+        });
+    </script>
+</body>
+</html>

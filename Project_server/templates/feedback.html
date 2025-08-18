@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Exercise Feedback</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body, html {
+            width: 100%;
+            height: 100vh;
+            font-family: 'Arial Black', Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            transition: all 0.3s ease;
+            overflow: hidden;
+        }
+        
+        .feedback-screen {
+            width: 100%;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            transition: all 0.5s ease;
+        }
+        
+        .main-text {
+            font-size: 8rem;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: 0.2em;
+            text-align: center;
+            text-shadow: 4px 4px 8px rgba(0,0,0,0.3);
+            margin-bottom: 2rem;
+            animation: pulse 2s infinite ease-in-out;
+        }
+        
+        .sub-text {
+            font-size: 2rem;
+            font-weight: 600;
+            text-align: center;
+            opacity: 0.8;
+        }
+        
+        .rep-counter {
+            position: absolute;
+            top: 30px;
+            right: 30px;
+            font-size: 3rem;
+            font-weight: bold;
+            background: rgba(0,0,0,0.1);
+            padding: 20px;
+            border-radius: 20px;
+        }
+        
+        /* Phase-specific styles */
+        .phase-ready {
+            background: linear-gradient(135deg, #f8f9fa, #e9ecef);
+            color: #495057;
+        }
+        
+        .phase-go {
+            background: linear-gradient(135deg, #ffffff, #f8f9fa);
+            color: #343a40;
+        }
+        
+        .phase-hold {
+            background: linear-gradient(135deg, #ffc107, #ffb300);
+            color: #212529;
+        }
+        
+        .phase-release {
+            background: linear-gradient(135deg, #28a745, #20c997);
+            color: #ffffff;
+        }
+        
+        .phase-return {
+            background: linear-gradient(135deg, #17a2b8, #6c757d);
+            color: #ffffff;
+        }
+        
+        .phase-completed {
+            background: linear-gradient(135deg, #6f42c1, #e83e8c);
+            color: #ffffff;
+        }
+        
+        .phase-waiting {
+            background: linear-gradient(135deg, #6c757d, #495057);
+            color: #ffffff;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+        
+        @keyframes flash {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        
+        .flash-animation {
+            animation: flash 0.5s ease-in-out 3;
+        }
+        
+        .connection-status {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            font-size: 1rem;
+            background: rgba(0,0,0,0.1);
+            padding: 10px 15px;
+            border-radius: 20px;
+        }
+        
+        .audio-status {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            font-size: 1rem;
+            background: rgba(0,0,0,0.1);
+            padding: 10px 15px;
+            border-radius: 20px;
+            cursor: pointer;
+        }
+        
+        .audio-enabled {
+            background: rgba(40, 167, 69, 0.3) !important;
+        }
+        
+        .audio-disabled {
+            background: rgba(220, 53, 69, 0.3) !important;
+        }
+        
+        @media (max-width: 768px) {
+            .main-text { font-size: 4rem; }
+            .sub-text { font-size: 1.5rem; }
+            .rep-counter { font-size: 2rem; top: 20px; right: 20px; padding: 15px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="feedback-screen phase-waiting" id="feedback-screen">
+        <div class="main-text" id="main-text">READY</div>
+        <div class="sub-text" id="sub-text">Connecting to sensor...</div>
+        <div class="rep-counter" id="rep-counter">0/10</div>
+        <div class="connection-status" id="connection-status">Connecting...</div>
+        <div class="audio-status audio-disabled" id="audio-status" onclick="forceAudioInit()">🔇 Audio Off</div>
+    </div>
+
+    <script>
+        // State management
+        let currentPhase = 'waiting';
+        let lastPhase = '';
+        let previousCount = 0;
+        let targetReps = 10; // Default, will be updated based on data
+        let holdStartTime = 0;
+        let isConnected = false;
+        
+        // DOM elements
+        const screen = document.getElementById('feedback-screen');
+        const mainText = document.getElementById('main-text');
+        const subText = document.getElementById('sub-text');
+        const repCounter = document.getElementById('rep-counter');
+        const audioStatus = document.getElementById('audio-status');
+        
+        // Update audio status display
+        function updateAudioStatus() {
+            if (isAudioInitialized && audioContext && audioContext.state === 'running') {
+                audioStatus.textContent = '🔊 Audio On';
+                audioStatus.className = 'audio-status audio-enabled';
+            } else {
+                audioStatus.textContent = '🔇 Audio Off';
+                audioStatus.className = 'audio-status audio-disabled';
+            }
+        }
+        
+        // Force audio initialization
+        function forceAudioInit() {
+            console.log('Forcing audio initialization...');
+            initializeAudio();
+            
+            // Play a test sound
+            setTimeout(() => {
+                if (isAudioInitialized) {
+                    playHoldSound();
+                }
+                updateAudioStatus();
+            }, 100);
+        }
+        
+        // Audio context for sound generation
+        let audioContext;
+        let isAudioInitialized = false;
+        
+        // Initialize audio immediately when possible
+        function initializeAudio() {
+            if (!isAudioInitialized) {
+                try {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    isAudioInitialized = true;
+                    console.log('Audio initialized successfully');
+                    
+                    // Test with a very quiet sound to "unlock" audio
+                    if (audioContext.state === 'suspended') {
+                        audioContext.resume().then(() => {
+                            console.log('Audio context resumed');
+                        });
+                    }
+                } catch (error) {
+                    console.error('Audio initialization failed:', error);
+                }
+            }
+        }
+        
+        // Auto-initialize audio on any interaction
+        ['click', 'touchstart', 'keydown', 'mousemove'].forEach(event => {
+            document.addEventListener(event, initializeAudio, { once: true, passive: true });
+        });
+        
+        // Try to initialize immediately (works on some browsers/situations)
+        setTimeout(() => {
+            initializeAudio();
+            // Force audio context resume if suspended
+            if (audioContext && audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+        }, 100);
+        
+        // Sound generation functions with better compatibility
+        function playHoldSound() {
+            if (!isAudioInitialized || !audioContext) {
+                console.log('Audio not ready for hold sound');
+                return;
+            }
+            
+            try {
+                // Ensure audio context is running
+                if (audioContext.state === 'suspended') {
+                    audioContext.resume();
+                }
+                
+                // Bell-like sound with better parameters
+                const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+                
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+                
+                oscillator.frequency.setValueAtTime(880, audioContext.currentTime); // A5 note
+                oscillator.frequency.exponentialRampToValueAtTime(440, audioContext.currentTime + 0.4); // A4 note
+                
+                gainNode.gain.setValueAtTime(0, audioContext.currentTime);
+                gainNode.gain.linearRampToValueAtTime(0.2, audioContext.currentTime + 0.01);
+                gainNode.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.4);
+                
+                oscillator.type = 'sine';
+                oscillator.start(audioContext.currentTime);
+                oscillator.stop(audioContext.currentTime + 0.4);
+                
+                console.log('Hold sound played');
+            } catch (error) {
+                console.error('Error playing hold sound:', error);
+            }
+        }
+        
+        function playReleaseSound() {
+            if (!isAudioInitialized || !audioContext) {
+                console.log('Audio not ready for release sound');
+                return;
+            }
+            
+            try {
+                if (audioContext.state === 'suspended') {
+                    audioContext.resume();
+                }
+                
+                // Double beep for release - distinctive from hold
+                const frequencies = [659, 523]; // E5, C5 (discendente)
+                const times = [0, 0.15];
+                
+                times.forEach((time, index) => {
+                    const oscillator = audioContext.createOscillator();
+                    const gainNode = audioContext.createGain();
+                    
+                    oscillator.connect(gainNode);
+                    gainNode.connect(audioContext.destination);
+                    
+                    oscillator.frequency.setValueAtTime(frequencies[index], audioContext.currentTime + time);
+                    gainNode.gain.setValueAtTime(0, audioContext.currentTime + time);
+                    gainNode.gain.linearRampToValueAtTime(0.18, audioContext.currentTime + time + 0.01);
+                    gainNode.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + time + 0.12);
+                    
+                    oscillator.type = 'triangle';
+                    oscillator.start(audioContext.currentTime + time);
+                    oscillator.stop(audioContext.currentTime + time + 0.12);
+                });
+                
+                console.log('Release sound played');
+            } catch (error) {
+                console.error('Error playing release sound:', error);
+            }
+        }
+        
+        function playCompletedSound() {
+            if (!isAudioInitialized || !audioContext) {
+                console.log('Audio not ready for completed sound');
+                return;
+            }
+            
+            try {
+                if (audioContext.state === 'suspended') {
+                    audioContext.resume();
+                }
+                
+                // Success fanfare - more prominent
+                const times = [0, 0.2, 0.4, 0.6];
+                const frequencies = [523, 659, 784, 1047]; // C, E, G, C (octave)
+                
+                times.forEach((time, index) => {
+                    const oscillator = audioContext.createOscillator();
+                    const gainNode = audioContext.createGain();
+                    
+                    oscillator.connect(gainNode);
+                    gainNode.connect(audioContext.destination);
+                    
+                    oscillator.frequency.setValueAtTime(frequencies[index], audioContext.currentTime + time);
+                    gainNode.gain.setValueAtTime(0, audioContext.currentTime + time);
+                    gainNode.gain.linearRampToValueAtTime(0.15, audioContext.currentTime + time + 0.01);
+                    gainNode.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + time + 0.5);
+                    
+                    oscillator.type = 'triangle';
+                    oscillator.start(audioContext.currentTime + time);
+                    oscillator.stop(audioContext.currentTime + time + 0.5);
+                });
+                
+                console.log('Completed sound played');
+            } catch (error) {
+                console.error('Error playing completed sound:', error);
+            }
+        }
+        
+        // Phase management
+        function updatePhase(newPhase, data = {}) {
+            if (newPhase === currentPhase) return;
+            
+            lastPhase = currentPhase;
+            currentPhase = newPhase;
+            
+            // Remove all phase classes
+            screen.className = 'feedback-screen';
+            screen.classList.add(`phase-${newPhase}`);
+            
+            switch(newPhase) {
+                case 'ready':
+                    mainText.textContent = 'READY';
+                    subText.textContent = 'Position yourself and start when ready';
+                    break;
+                    
+                case 'go':
+                    mainText.textContent = 'GO!';
+                    subText.textContent = 'Move to target position';
+                    break;
+                    
+                case 'hold':
+                    mainText.textContent = 'HOLD!';
+                    subText.textContent = 'Maintain position';
+                    holdStartTime = Date.now();
+                    playHoldSound();
+                    break;
+                    
+                case 'release':
+                    mainText.textContent = 'RELEASE!';
+                    subText.textContent = 'Good! Now return to start';
+                    screen.classList.add('flash-animation');
+                    setTimeout(() => screen.classList.remove('flash-animation'), 1500);
+                    playReleaseSound(); // Nuovo suono aggiunto qui
+                    break;
+                    
+                case 'return':
+                    mainText.textContent = 'RETURN';
+                    subText.textContent = 'Return to starting position';
+                    break;
+                    
+                case 'completed':
+                    mainText.textContent = 'COMPLETED!';
+                    subText.textContent = `Great job! You completed ${data.count || targetReps} repetitions`;
+                    screen.classList.add('flash-animation');
+                    setTimeout(() => screen.classList.remove('flash-animation'), 2000);
+                    playCompletedSound();
+                    break;
+                    
+                case 'waiting':
+                    mainText.textContent = 'WAITING';
+                    subText.textContent = 'Connecting to sensor...';
+                    break;
+            }
+            
+            console.log(`Phase changed: ${lastPhase} → ${currentPhase}`);
+        }
+        
+        // Data processing logic
+        function processData(data) {
+            const { inPos, tempoPos, conteggio } = data;
+            
+            // Update rep counter
+            repCounter.textContent = `${conteggio}/${targetReps}`;
+            
+            // Determine target reps from data pattern (adjust as needed)
+            if (conteggio > 0 && targetReps === 10) {
+                // Try to detect if it's 5 or 10 reps based on your Teensy code
+                // You can adjust this logic based on your specific implementation
+            }
+            
+            // State machine logic
+            if (conteggio >= targetReps && currentPhase !== 'completed') {
+                // All reps completed
+                updatePhase('completed', data);
+            } else if (inPos) {
+                // In target position
+                if (currentPhase !== 'hold' && currentPhase !== 'release') {
+                    updatePhase('hold');
+                } else if (currentPhase === 'hold' && tempoPos >= 500) {
+                    // Held long enough
+                    updatePhase('release');
+                }
+            } else {
+                // Not in position
+                if (currentPhase === 'release' || currentPhase === 'hold') {
+                    // Was in position, now returning
+                    updatePhase('return');
+                } else if (currentPhase === 'return' || currentPhase === 'ready') {
+                    // Ready for next rep
+                    if (conteggio < targetReps) {
+                        updatePhase('go');
+                    }
+                } else if (currentPhase === 'waiting') {
+                    // First connection
+                    updatePhase('ready');
+                }
+            }
+            
+            // Check for rep completion
+            if (conteggio > previousCount) {
+                console.log(`Rep completed! Count: ${previousCount} → ${conteggio}`);
+                previousCount = conteggio;
+            }
+        }
+        
+        // Socket connection
+        const socket = io({
+            transports: ['websocket', 'polling'],
+            upgrade: true,
+            reconnection: true,
+            reconnectionAttempts: 10,
+            reconnectionDelay: 1000,
+            timeout: 10000,
+            forceNew: true
+        });
+        
+        socket.on('connect', () => {
+            isConnected = true;
+            connectionStatus.textContent = 'Connected';
+            connectionStatus.style.background = 'rgba(40, 167, 69, 0.3)';
+            
+            if (currentPhase === 'waiting') {
+                updatePhase('ready');
+            }
+        });
+        
+        socket.on('disconnect', () => {
+            isConnected = false;
+            connectionStatus.textContent = 'Disconnected';
+            connectionStatus.style.background = 'rgba(220, 53, 69, 0.3)';
+            updatePhase('waiting');
+        });
+        
+        socket.on('sensor_update', processData);
+        
+        // Initialize audio on any user interaction
+        document.addEventListener('touchstart', initializeAudio, { once: true });
+        
+        // Auto-initialize audio after a delay (some browsers allow this)
+        setTimeout(initializeAudio, 2000);
+        
+        console.log('Feedback screen initialized');
+    </script>
+</body>
+</html>
